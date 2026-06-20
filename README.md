@@ -48,6 +48,7 @@ The output DLL goes in `bin/Release/netstandard2.0/`.
 ## Wishlist / future ideas
  
 - **Spawn a bunny once everything's collected.** If every data drive across all ship archetypes has already been found, the hardpoint should spawn a bunny instead of nothing. Right now an exhausted pool just means an empty slot — a bunny would actually signal "you've got it all," and bump your Roadtrip Friends counter instead of wasting the slot entirely.
+- **Confirm the credit drive fallback claim.** It's possible (based on play experience, not confirmed in code/logs during dev) that an exhausted data drive pool already falls back to a credit drive on its own via vanilla logic. This needs to actually be traced through TryMarkObjectForDestruction and whatever runs after it before it's stated as fact anywhere more public than this git repo.
 
 ## License
 
