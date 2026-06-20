@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# VS Code
+.vscode/
+
+# Rider
+.idea/
+*.sln.iml
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Game DLL references (don't commit copyrighted game assemblies)
+lib/
+*.dll
+
+# Logs from testing
+*.log
+LogOutput.log
