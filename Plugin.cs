@@ -5,7 +5,6 @@ using BBI.Unity.Game;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.AsyncOperations;
 
@@ -37,52 +36,6 @@ namespace DataDriveSupremacy
             Logger.LogInfo(DogArt);
             Logger.LogInfo(ModSignature);
             Logger.LogInfo("DataDriveSupremacy loaded!");
-        }
-    }
-
-    // Logs the full GameObject hierarchy + every component on anything with a
-    // NarrativeItemComponent. This is how we found out bunnies don't even
-    // have this component -- they're not part of the narrative system at all.
-    [HarmonyPatch(typeof(NarrativeItemComponent), "Awake")]
-    class Patch_NarrativeItemComponent_Awake
-    {
-        static void Postfix(NarrativeItemComponent __instance)
-        {
-            var t = __instance.gameObject.transform;
-            string hierarchy = t.name;
-            while (t.parent != null)
-            {
-                t = t.parent;
-                hierarchy = t.name + " > " + hierarchy;
-            }
-            Plugin.Log.LogInfo($"[DataDriveSupremacy] NarrativeItem hierarchy: {hierarchy}");
-            foreach (var component in __instance.gameObject.GetComponents<Component>())
-            {
-                Plugin.Log.LogInfo($"  Component: {component.GetType().FullName}");
-            }
-        }
-    }
-
-    // Fires after the game refreshes which data drive entries are still up
-    // for grabs. Just confirming the pool is what we think it is (data drive
-    // lore categories, nothing else).
-    [HarmonyPatch(typeof(NarrativeItemSystem), "RefreshSpawnableEntries")]
-    class Patch_RefreshSpawnableEntries
-    {
-        static void Postfix(NarrativeItemSystem __instance)
-        {
-            Plugin.Log.LogInfo("[DataDriveSupremacy] RefreshSpawnableEntries fired!");
-
-            var entriesField = typeof(NarrativeItemSystem)
-                .GetField("mCurrentlySpawnableEntries", BindingFlags.NonPublic | BindingFlags.Instance);
-
-            var entries = entriesField.GetValue(__instance)
-                as Dictionary<NarrativeCategoryAsset, List<NarrativeEntryAsset>>;
-
-            foreach (var key in entries.Keys)
-            {
-                Plugin.Log.LogInfo($"[DataDriveSupremacy] Category: {key.name} | {key.CategoryName} | Weight: {key.CategorySpawnWeight} | Entries: {entries[key].Count}");
-            }
         }
     }
 
@@ -142,12 +95,9 @@ namespace DataDriveSupremacy
 
                 if (!isDataDrive && !isHelmet)
                 {
-                    Plugin.Log.LogInfo($"[DataDriveSupremacy] Zeroing weight for {path} (was {entry.Weight}) in {__instance.name}");
+                    float before = entry.Weight;
                     entry.Weight = 0f;
-                }
-                else
-                {
-                    Plugin.Log.LogInfo($"[DataDriveSupremacy] Keeping {path} (weight {entry.Weight}) in {__instance.name}");
+                    Plugin.Log.LogInfo($"[DataDriveSupremacy] {path}: weight {before} -> {entry.Weight}");
                 }
 
                 sAlreadyPatched.Add(id);
