@@ -32,4 +32,19 @@
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Hardspace Shipbreaker\Shipbreaker_Data\Managed\Unity.ResourceManager.dll</HintPath>
     </Reference>
   </ItemGroup>
+
+  <Target Name="CopyToPluginsFolder" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <ReleaseRoot>$(ProjectDir)bin\Release\</ReleaseRoot>
+      <PluginsRoot>$(ReleaseRoot)BepInEx\plugins\</PluginsRoot>
+      <ReleaseZipPath>$(ReleaseRoot)$(MSBuildProjectName).zip</ReleaseZipPath>
+    </PropertyGroup>
+
+    <MakeDir Directories="$(PluginsRoot)" Condition="!Exists('$(PluginsRoot)')" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PluginsRoot)" />
+
+    <Delete Files="$(ReleaseZipPath)" Condition="Exists('$(ReleaseZipPath)')" />
+    <ZipDirectory SourceDirectory="$(ReleaseRoot)BepInEx" DestinationFile="$(ReleaseZipPath)" />
+  </Target>
+
 </Project>
