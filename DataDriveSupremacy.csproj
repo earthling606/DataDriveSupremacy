@@ -28,8 +28,14 @@
     <Reference Include="Unity.Addressables">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Hardspace Shipbreaker\Shipbreaker_Data\Managed\Unity.Addressables.dll</HintPath>
     </Reference>
+    <Reference Include="Unity.Entities">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Hardspace Shipbreaker\Shipbreaker_Data\Managed\Unity.Entities.dll</HintPath>
+    </Reference>
     <Reference Include="Unity.ResourceManager">
       <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Hardspace Shipbreaker\Shipbreaker_Data\Managed\Unity.ResourceManager.dll</HintPath>
+    </Reference>
+    <Reference Include="Carbon.Localization.Core">
+      <HintPath>C:\Program Files (x86)\Steam\steamapps\common\Hardspace Shipbreaker\Shipbreaker_Data\Managed\Carbon.Localization.Core.dll</HintPath>
     </Reference>
   </ItemGroup>
 
