@@ -1,22 +1,25 @@
-﻿using BepInEx;
+using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using BBI.Unity.Game;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Unity.Entities;
+using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.AsyncOperations;
 
 namespace DataDriveSupremacy
 {
-    [BepInPlugin("com.earthling.datadrivesupremacy", "DataDriveSupremacy", "1.0.0")]
+    [BepInPlugin("com.earthling.datadrivesupremacy", "DataDriveSupremacy", "1.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         public static ManualLogSource Log;
 
         // Signature -- if you're reading this in a decompiler wondering whose
-        // mod this actually is: mine. earthling606, github.com/earthling606/DataDriveSupremacy
+        // mod this actually is: mine ~ github.com/earthling606/DataDriveSupremacy
         private const string ModSignature = "DataDriveSupremacy by earthling606 -- github.com/earthling606/DataDriveSupremacy";
 
         private const string DogArt =
@@ -39,20 +42,13 @@ namespace DataDriveSupremacy
         }
     }
 
-    // This is the actual mod. ML_FoundNarrativeDevices_RandomRotation and
-    // ML_FoundNarrativeDevices_NoRotation are the two ModuleListAssets where
-    // the bunny, data tablet, data drive, and helmets all compete for the
-    // same hardpoint slot. Credit chips live in a totally separate pool
-    // (ML_CreditDrives) and aren't touched here.
+    // Patch 1 — narrative-device hardpoints can only produce data drives (or helmets).
     //
-    // Helmets stay untouched on purpose -- they're a rare ghost-ship-only
-    // collectible and there's no reason to risk locking those out. Only the
-    // bunny and data tablet get zeroed out, so data drives and helmets are
-    // the only things left in the running.
-    //
-    // Zeroing the weight just makes an entry mathematically impossible to
-    // win the roll. Nothing gets deleted, the prefab reference is still
-    // sitting right there if you want to undo this later.
+    // ML_FoundNarrativeDevices_RandomRotation and ML_FoundNarrativeDevices_NoRotation are the
+    // ModuleListAssets where bunny, data tablet, data drive, and helmet compete. We zero the
+    // bunny and data tablet so only the data drive (and the rare ghost-ship helmet, left alone)
+    // can win. We also stash the data-drive prefab reference here so Patch 3 can re-spawn one
+    // when swapping out a credit drive.
     [HarmonyPatch(typeof(ModuleListAsset), "GenerateRandomModulesAsync")]
     class Patch_ForceDataDriveOnly
     {
@@ -62,9 +58,12 @@ namespace DataDriveSupremacy
             "ML_FoundNarrativeDevices_NoRotation"
         };
 
-        // Cache instance IDs already processed so we don't redo work on
-        // every single roll across the whole ship.
+        // Cache instance IDs already processed so we don't redo work on every roll.
         private static readonly HashSet<int> sAlreadyPatched = new HashSet<int>();
+
+        // The data-drive prefab reference, captured the first time we see it. Patch 3 uses it
+        // to instantiate a data drive when swapping out a credit drive.
+        internal static AssetReferenceGameObject sDataDriveRef;
 
         static void Prefix(ModuleListAsset __instance)
         {
@@ -99,6 +98,11 @@ namespace DataDriveSupremacy
                     entry.Weight = 0f;
                     Plugin.Log.LogInfo($"[DataDriveSupremacy] {path}: weight {before} -> {entry.Weight}");
                 }
+                else if (isDataDrive && sDataDriveRef == null)
+                {
+                    sDataDriveRef = entry.ModuleDefRef;
+                    Plugin.Log.LogInfo($"[DataDriveSupremacy] Data-drive prefab ref captured for swaps: {path}");
+                }
 
                 sAlreadyPatched.Add(id);
             }
@@ -108,8 +112,7 @@ namespace DataDriveSupremacy
         {
             try
             {
-                AsyncOperationHandle<IList<UnityEngine.ResourceManagement.ResourceLocations.IResourceLocation>> op
-                    = Addressables.LoadResourceLocationsAsync(guid);
+                var op = Addressables.LoadResourceLocationsAsync(guid);
                 var locations = op.WaitForCompletion();
                 string result = (locations != null && locations.Count > 0) ? locations[0].InternalId : null;
                 Addressables.Release(op);
@@ -118,6 +121,143 @@ namespace DataDriveSupremacy
             catch
             {
                 return null;
+            }
+        }
+    }
+
+    // Patch 2 — records the credit-drive prefab name(s) during catalogue generation so Patch 3
+    // knows what to look for in a spawned ship. Generation always runs before spawn, so the names
+    // are ready in time.
+    [HarmonyPatch(typeof(ModuleListAsset), "GenerateRandomModulesAsync")]
+    class Patch_RecordCreditDrivePrefabs
+    {
+        private const string kTargetList = "ML_CreditDrives";
+
+        // Prefab file names (no extension) of every credit-drive entry seen. Shared with Patch 3.
+        internal static readonly HashSet<string> sCreditDrivePrefabNames = new HashSet<string>();
+
+        private static readonly FieldInfo sDataField =
+            typeof(ModuleListAsset).GetField("m_Data", BindingFlags.NonPublic | BindingFlags.Instance);
+
+        static void Prefix(ModuleListAsset __instance)
+        {
+            if (__instance.name != kTargetList) return;
+            var data = sDataField.GetValue(__instance) as ModuleListData;
+            if (data?.ModuleEntryContainer == null) return;
+
+            for (int i = 0; i < data.ModuleEntryContainer.Count; i++)
+            {
+                var entry = data.ModuleEntryContainer[i] as ModuleEntryDefinition;
+                if (entry?.ModuleDefRef == null) continue;
+
+                string key = entry.ModuleDefRef.RuntimeKey as string;
+                if (string.IsNullOrEmpty(key)) continue;
+
+                string path = ResolvePath(key);
+                if (string.IsNullOrEmpty(path)) continue;
+
+                string prefabName = System.IO.Path.GetFileNameWithoutExtension(path);
+                if (!string.IsNullOrEmpty(prefabName) && sCreditDrivePrefabNames.Add(prefabName))
+                    Plugin.Log.LogInfo($"[DataDriveSupremacy] Credit-drive prefab registered: \"{prefabName}\"");
+            }
+        }
+
+        private static string ResolvePath(string guid)
+        {
+            try
+            {
+                var op = Addressables.LoadResourceLocationsAsync(guid);
+                var locations = op.WaitForCompletion();
+                string result = (locations != null && locations.Count > 0) ? locations[0].InternalId : null;
+                Addressables.Release(op);
+                return result;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+    }
+
+    // Patch 3 — the core behaviour. At spawn-complete (postfix of RefreshSpawnableEntries, which
+    // has just rebuilt the lore state for THIS ship), if lore is still available we replace every
+    // active credit drive with a data drive in the same spot. If lore is exhausted we leave the
+    // credit drive as the reward.
+    //
+    // Credit drives and data drives are mutually exclusive per ship, so a credit drive showing up
+    // on a lore-available ship is exactly the case we want to convert. The data drive collects and
+    // banks lore normally (note: a swapped drive lacks the first-person grab animation — purely
+    // cosmetic, since collection runs through the prefab's NarrativeItemComponent).
+    [HarmonyPatch(typeof(NarrativeItemSystem), "RefreshSpawnableEntries")]
+    class Patch_SwapCreditDriveForData
+    {
+        private static readonly FieldInfo sTotalWeightField =
+            typeof(NarrativeItemSystem).GetField("mCurrentTotalCategoryWeight",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo sSpawnableEntriesField =
+            typeof(NarrativeItemSystem).GetField("mCurrentlySpawnableEntries",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+
+        static void Postfix(NarrativeItemSystem __instance, ShipRoot shipRoot)
+        {
+            try
+            {
+                if (shipRoot == null) return;
+
+                bool loreAvailable = LoreAvailable(__instance);
+                var dataRef = Patch_ForceDataDriveOnly.sDataDriveRef;
+
+                foreach (var t in shipRoot.GetComponentsInChildren<Transform>(true))
+                {
+                    if (!t.gameObject.activeInHierarchy) continue;
+
+                    string clean = t.gameObject.name.Replace("(Clone)", "").Trim();
+                    if (!Patch_RecordCreditDrivePrefabs.sCreditDrivePrefabNames.Contains(clean)) continue;
+
+                    if (!loreAvailable)
+                    {
+                        // No lore left for this ship — the credit drive stays as the reward.
+                        Plugin.Log.LogInfo("[DataDriveSupremacy] Lore exhausted for this ship — kept the credit drive.");
+                        continue;
+                    }
+
+                    if (dataRef == null) continue;
+
+                    // Drop a data drive where the credit drive was, then remove the credit drive.
+                    Vector3 pos = t.position;
+                    Quaternion rot = t.rotation;
+                    Transform parent = t.parent != null ? t.parent : shipRoot.transform;
+
+                    try
+                    {
+                        Addressables.InstantiateAsync(dataRef, pos, rot, parent, true);
+                        DestroyObjectsSystem.TryMarkObjectForDestruction(t.gameObject, 0f);
+                        Plugin.Log.LogInfo("[DataDriveSupremacy] Lore available — swapped a credit drive for a data drive.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[DataDriveSupremacy] Credit->data swap failed: {ex.Message}. Left the credit drive.");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[DataDriveSupremacy] Swap pass failed: {ex.Message}");
+            }
+        }
+
+        // Mirrors NarrativeItemSystem.GetRandomValidNarrativeEntry's own null check.
+        private static bool LoreAvailable(NarrativeItemSystem system)
+        {
+            try
+            {
+                float totalWeight = (float)(sTotalWeightField?.GetValue(system) ?? 0f);
+                var dict = sSpawnableEntriesField?.GetValue(system) as System.Collections.IDictionary;
+                return totalWeight > 0f && dict != null && dict.Count > 0;
+            }
+            catch
+            {
+                return false;
             }
         }
     }

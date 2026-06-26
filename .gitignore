@@ -25,3 +25,6 @@ lib/
 # Logs from testing
 *.log
 LogOutput.log
+
+# Assets
+nexus_assets/
