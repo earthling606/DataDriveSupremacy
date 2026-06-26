@@ -1,4 +1,4 @@
-﻿using BepInEx;
+using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using BBI.Unity.Game;
@@ -13,7 +13,7 @@ using UnityEngine.ResourceManagement.AsyncOperations;
 
 namespace DataDriveSupremacy
 {
-    [BepInPlugin("com.earthling.datadrivesupremacy", "DataDriveSupremacy", "1.1.0")]
+    [BepInPlugin("com.earthling.datadrivesupremacy", "DataDriveSupremacy", "1.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         public static ManualLogSource Log;
@@ -42,15 +42,13 @@ namespace DataDriveSupremacy
         }
     }
 
-    // Patch 1 — zeros out bunnies and data tablets from the two narrative device loot
-    // pools, leaving only data drives and helmets competing for that hardpoint slot.
+    // Patch 1 — narrative-device hardpoints can only produce data drives (or helmets).
     //
-    // ML_FoundNarrativeDevices_RandomRotation and ML_FoundNarrativeDevices_NoRotation
-    // are the ModuleListAssets where bunny, data tablet, data drive, and helmet all
-    // compete. Helmets are intentionally untouched (rare ghost-ship-only collectible).
-    //
-    // Credit drives live in a separate pool (ML_CreditDrives) on their own hardpoints
-    // and are handled by Patch_CreditDriveFallbackOnly below.
+    // ML_FoundNarrativeDevices_RandomRotation and ML_FoundNarrativeDevices_NoRotation are the
+    // ModuleListAssets where bunny, data tablet, data drive, and helmet compete. We zero the
+    // bunny and data tablet so only the data drive (and the rare ghost-ship helmet, left alone)
+    // can win. We also stash the data-drive prefab reference here so Patch 3 can re-spawn one
+    // when swapping out a credit drive.
     [HarmonyPatch(typeof(ModuleListAsset), "GenerateRandomModulesAsync")]
     class Patch_ForceDataDriveOnly
     {
@@ -60,9 +58,12 @@ namespace DataDriveSupremacy
             "ML_FoundNarrativeDevices_NoRotation"
         };
 
-        // Cache instance IDs already processed so we don't redo work on
-        // every single roll across the whole ship.
+        // Cache instance IDs already processed so we don't redo work on every roll.
         private static readonly HashSet<int> sAlreadyPatched = new HashSet<int>();
+
+        // The data-drive prefab reference, captured the first time we see it. Patch 3 uses it
+        // to instantiate a data drive when swapping out a credit drive.
+        internal static AssetReferenceGameObject sDataDriveRef;
 
         static void Prefix(ModuleListAsset __instance)
         {
@@ -97,6 +98,11 @@ namespace DataDriveSupremacy
                     entry.Weight = 0f;
                     Plugin.Log.LogInfo($"[DataDriveSupremacy] {path}: weight {before} -> {entry.Weight}");
                 }
+                else if (isDataDrive && sDataDriveRef == null)
+                {
+                    sDataDriveRef = entry.ModuleDefRef;
+                    Plugin.Log.LogInfo($"[DataDriveSupremacy] Data-drive prefab ref captured for swaps: {path}");
+                }
 
                 sAlreadyPatched.Add(id);
             }
@@ -119,49 +125,19 @@ namespace DataDriveSupremacy
         }
     }
 
-    // Patch 2 — gates credit drives so they only spawn when all narrative lore for the
-    // current ship archetype has already been collected.
-    //
-    // How the game handles the credit-drive-vs-data-drive split (from NarrativeItemComponent.cs):
-    //
-    //   1. The ship generates. The narrative device hardpoint and the credit drive hardpoint
-    //      both roll independently — they are separate slots.
-    //   2. After the ship finishes spawning, every NarrativeItemComponent on the ship
-    //      calls NarrativeItemSystem.GetRandomValidNarrativeEntry(). If that returns null
-    //      (no uncollected lore entries match this ship's archetype), the component calls
-    //      DestroyObjectsSystem.TryMarkObjectForDestruction on its own parent — the data
-    //      drive vanishes. The credit drive from its own hardpoint then remains in the scene.
-    //   3. If lore IS still available the data drive stays, and the credit drive was also
-    //      already sitting in the scene from its own separate hardpoint.
-    //
-    // This patch closes that gap: during ship generation (step 1), if lore is still
-    // available we zero every entry in ML_CreditDrives so the credit drive slot produces
-    // nothing. When lore is exhausted we restore the original weights so the normal
-    // property-weighted roll runs and a credit drive spawns as the fallback.
-    //
-    // Timing caveat: NarrativeItemSystem.mCurrentlySpawnableEntries is refreshed per-ship
-    // at spawn-COMPLETE time, but this patch fires DURING generation (before that). So the
-    // lore check here reflects the PREVIOUS ship's archetype state, not the current one.
-    // In practice this means a one-ship lag at the moment lore transitions from available
-    // to exhausted. For steady-state play on a single ship type there is no lag.
+    // Patch 2 — records the credit-drive prefab name(s) during catalogue generation so Patch 3
+    // knows what to look for in a spawned ship. Generation always runs before spawn, so the names
+    // are ready in time.
     [HarmonyPatch(typeof(ModuleListAsset), "GenerateRandomModulesAsync")]
-    class Patch_CreditDriveFallbackOnly
+    class Patch_RecordCreditDrivePrefabs
     {
         private const string kTargetList = "ML_CreditDrives";
-        private const bool kDryRun = false;
 
-        private static readonly Dictionary<int, float> sOriginalWeights = new Dictionary<int, float>();
-        private static string sLastLoggedShipKey = "[[init]]";
+        // Prefab file names (no extension) of every credit-drive entry seen. Shared with Patch 3.
+        internal static readonly HashSet<string> sCreditDrivePrefabNames = new HashSet<string>();
 
-        private static readonly FieldInfo sTotalWeightField =
-            typeof(NarrativeItemSystem).GetField("mCurrentTotalCategoryWeight",
-                BindingFlags.NonPublic | BindingFlags.Instance);
-        private static readonly FieldInfo sSpawnableEntriesField =
-            typeof(NarrativeItemSystem).GetField("mCurrentlySpawnableEntries",
-                BindingFlags.NonPublic | BindingFlags.Instance);
         private static readonly FieldInfo sDataField =
-            typeof(ModuleListAsset).GetField("m_Data",
-                BindingFlags.NonPublic | BindingFlags.Instance);
+            typeof(ModuleListAsset).GetField("m_Data", BindingFlags.NonPublic | BindingFlags.Instance);
 
         static void Prefix(ModuleListAsset __instance)
         {
@@ -171,180 +147,117 @@ namespace DataDriveSupremacy
 
             for (int i = 0; i < data.ModuleEntryContainer.Count; i++)
             {
-                var entry = data.ModuleEntryContainer[i] as ModuleEntryBase;
-                if (entry == null) continue;
-                int id = entry.GetInstanceID();
-                if (!sOriginalWeights.ContainsKey(id))
-                    sOriginalWeights[id] = entry.Weight;
-            }
+                var entry = data.ModuleEntryContainer[i] as ModuleEntryDefinition;
+                if (entry?.ModuleDefRef == null) continue;
 
-            bool loreAvailable = CheckLoreAvailable(out int entryCount, out int categoryCount);
-            TryGetShipInfo(out var root, out string archetype, out string shipName);
+                string key = entry.ModuleDefRef.RuntimeKey as string;
+                if (string.IsNullOrEmpty(key)) continue;
 
-            // Deduplicate: only log once per ShipRoot instance (i.e. once per ship in the bay)
-            string shipKey = root != null ? root.GetInstanceID().ToString() : "[[no-ship]]";
-            if (shipKey != sLastLoggedShipKey)
-            {
-                sLastLoggedShipKey = shipKey;
+                string path = ResolvePath(key);
+                if (string.IsNullOrEmpty(path)) continue;
 
-                if (root == null)
-                {
-                    Plugin.Log.LogInfo(
-                        "[DataDriveSupremacy] No ship currently in bay (first ship of session). " +
-                        "NarrativeItemSystem not yet initialized — lore check is unreliable. " +
-                        (kDryRun ? "[DRY RUN] " : "") + "Defaulting to: allow credit drives.");
-                }
-                else
-                {
-                    Plugin.Log.LogInfo(
-                        $"[DataDriveSupremacy] Ship in bay: {archetype} (\"{shipName}\") — " +
-                        (loreAvailable
-                            ? $"{entryCount} lore entr{(entryCount == 1 ? "y" : "ies")} across " +
-                              $"{categoryCount} categor{(categoryCount == 1 ? "y" : "ies")} remaining."
-                            : "lore exhausted.") +
-                        (kDryRun
-                            ? (loreAvailable
-                                ? " [DRY RUN] Would suppress credit drives."
-                                : " [DRY RUN] Would allow credit drives.")
-                            : (loreAvailable
-                                ? " Suppressing credit drives."
-                                : " Allowing credit drives.")));
-                }
-            }
-
-            if (!kDryRun)
-            {
-                for (int i = 0; i < data.ModuleEntryContainer.Count; i++)
-                {
-                    var entry = data.ModuleEntryContainer[i] as ModuleEntryBase;
-                    if (entry == null) continue;
-                    if (loreAvailable)
-                    {
-                        entry.Weight = 0f;
-                    }
-                    else
-                    {
-                        int id = entry.GetInstanceID();
-                        if (sOriginalWeights.TryGetValue(id, out float original))
-                            entry.Weight = original;
-                    }
-                }
+                string prefabName = System.IO.Path.GetFileNameWithoutExtension(path);
+                if (!string.IsNullOrEmpty(prefabName) && sCreditDrivePrefabNames.Add(prefabName))
+                    Plugin.Log.LogInfo($"[DataDriveSupremacy] Credit-drive prefab registered: \"{prefabName}\"");
             }
         }
 
-        private static bool CheckLoreAvailable(out int entryCount, out int categoryCount)
+        private static string ResolvePath(string guid)
         {
-            entryCount = 0;
-            categoryCount = 0;
             try
             {
-                var world = World.DefaultGameObjectInjectionWorld;
-                if (world == null) return false;
-                var system = world.GetExistingSystem<NarrativeItemSystem>();
-                if (system == null) return false;
-                if (sTotalWeightField == null || sSpawnableEntriesField == null) return false;
-                float totalWeight = (float)sTotalWeightField.GetValue(system);
-                if (totalWeight <= 0f) return false;
-                if (!(sSpawnableEntriesField.GetValue(system) is System.Collections.IDictionary entries) || entries.Count == 0)
-                    return false;
-                categoryCount = entries.Count;
-                foreach (object val in entries.Values)
-                    if (val is System.Collections.ICollection col)
-                        entryCount += col.Count;
-                return entryCount > 0;
+                var op = Addressables.LoadResourceLocationsAsync(guid);
+                var locations = op.WaitForCompletion();
+                string result = (locations != null && locations.Count > 0) ? locations[0].InternalId : null;
+                Addressables.Release(op);
+                return result;
             }
-            catch (Exception ex)
+            catch
             {
-                Plugin.Log.LogWarning($"[DataDriveSupremacy] Lore check failed: {ex.Message}. Defaulting to: allow credit drives.");
-                return false;
+                return null;
             }
-        }
-
-        private static void TryGetShipInfo(out ShipRoot root, out string archetype, out string shipName)
-        {
-            root = null;
-            archetype = "Unknown";
-            shipName = "Unknown";
-            try
-            {
-                root = UnityEngine.Object.FindObjectOfType<ShipRoot>();
-                var preview = root?.SourceShipPreview;
-                if (preview == null) return;
-                archetype = string.IsNullOrEmpty(preview.Archetype) ? "Unknown" : preview.Archetype;
-                Main.Instance?.LocalizationService?.TryLocalize(archetype, out archetype);
-                shipName = string.IsNullOrEmpty(preview.ShipName) ? "Unknown" : preview.ShipName;
-            }
-            catch { root = null; }
         }
     }
 
-
+    // Patch 3 — the core behaviour. At spawn-complete (postfix of RefreshSpawnableEntries, which
+    // has just rebuilt the lore state for THIS ship), if lore is still available we replace every
+    // active credit drive with a data drive in the same spot. If lore is exhausted we leave the
+    // credit drive as the reward.
+    //
+    // Credit drives and data drives are mutually exclusive per ship, so a credit drive showing up
+    // on a lore-available ship is exactly the case we want to convert. The data drive collects and
+    // banks lore normally (note: a swapped drive lacks the first-person grab animation — purely
+    // cosmetic, since collection runs through the prefab's NarrativeItemComponent).
     [HarmonyPatch(typeof(NarrativeItemSystem), "RefreshSpawnableEntries")]
-    class Patch_LogLoreBreakdown
+    class Patch_SwapCreditDriveForData
     {
-        // Builds up as you play — archetypes you haven't seen yet show as "? (guid...)"
-        private static readonly Dictionary<string, string> sGuidToArchetype = new Dictionary<string, string>();
+        private static readonly FieldInfo sTotalWeightField =
+            typeof(NarrativeItemSystem).GetField("mCurrentTotalCategoryWeight",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly FieldInfo sSpawnableEntriesField =
+            typeof(NarrativeItemSystem).GetField("mCurrentlySpawnableEntries",
+                BindingFlags.NonPublic | BindingFlags.Instance);
 
-        static void Postfix(ShipRoot shipRoot)
+        static void Postfix(NarrativeItemSystem __instance, ShipRoot shipRoot)
         {
             try
             {
-                string guid = shipRoot?.SourceShipPreview?.ConstructionAssetRef?.RuntimeKey as string;
-                string archetype = shipRoot?.SourceShipPreview?.Archetype;
-                Main.Instance?.LocalizationService?.TryLocalize(archetype, out archetype);
-                string shipName = shipRoot?.SourceShipPreview?.ShipName ?? "?";
+                if (shipRoot == null) return;
 
-                if (!string.IsNullOrEmpty(guid) && !string.IsNullOrEmpty(archetype))
-                    sGuidToArchetype[guid] = archetype;
+                bool loreAvailable = LoreAvailable(__instance);
+                var dataRef = Patch_ForceDataDriveOnly.sDataDriveRef;
 
-                var allEntries = Main.Instance.MainSettings.NarrativeSettings.NarrativeAssetList.NarrativeEntries;
-                if (allEntries == null || allEntries.Count == 0) return;
-
-                var inv = PlayerProfileService.Instance.Profile.NarrativeInventory;
-                var collectedU = inv.CollectedUnidentifiedNarrativeEntries;
-                var collectedI = inv.CollectedIdentifiedNarrativeEntries;
-
-                var counts = new Dictionary<string, (int total, int remaining)>();
-
-                foreach (var entry in allEntries)
+                foreach (var t in shipRoot.GetComponentsInChildren<Transform>(true))
                 {
-                    if (!entry.OneTimeCollectible) continue;
+                    if (!t.gameObject.activeInHierarchy) continue;
 
-                    bool collected =
-                        (collectedU.TryGetValue(entry.ID, out var l1) && l1.Count > 0) ||
-                        (collectedI.TryGetValue(entry.ID, out var l2) && l2.Count > 0);
+                    string clean = t.gameObject.name.Replace("(Clone)", "").Trim();
+                    if (!Patch_RecordCreditDrivePrefabs.sCreditDrivePrefabNames.Contains(clean)) continue;
 
-                    IEnumerable<string> keys;
-                    if (entry.PossibleShipsRef == null || entry.PossibleShipsRef.Length == 0)
+                    if (!loreAvailable)
                     {
-                        keys = new[] { "Any archetype" };
-                    }
-                    else
-                    {
-                        keys = entry.PossibleShipsRef
-                            .Select(r => r?.RuntimeKey as string)
-                            .Where(g => !string.IsNullOrEmpty(g))
-                            .Select(g => sGuidToArchetype.TryGetValue(g, out var n) ? n : $"? ({g.Substring(0, 8)})")
-                            .Distinct();
+                        // No lore left for this ship — the credit drive stays as the reward.
+                        Plugin.Log.LogInfo("[DataDriveSupremacy] Lore exhausted for this ship — kept the credit drive.");
+                        continue;
                     }
 
-                    foreach (var key in keys)
-                    {
-                        counts.TryGetValue(key, out var cur);
-                        counts[key] = (cur.total + 1, cur.remaining + (collected ? 0 : 1));
-                    }
-                }
+                    if (dataRef == null) continue;
 
-                Plugin.Log.LogInfo($"[DataDriveSupremacy] === Lore status ({archetype ?? "?"} \"{shipName}\" spawned) ===");
-                foreach (var kv in counts.OrderByDescending(x => x.Value.remaining).ThenBy(x => x.Key))
-                {
-                    string status = kv.Value.remaining == 0 ? " [EXHAUSTED]" : "";
-                    Plugin.Log.LogInfo($"  {kv.Key}: {kv.Value.remaining}/{kv.Value.total} remaining{status}");
+                    // Drop a data drive where the credit drive was, then remove the credit drive.
+                    Vector3 pos = t.position;
+                    Quaternion rot = t.rotation;
+                    Transform parent = t.parent != null ? t.parent : shipRoot.transform;
+
+                    try
+                    {
+                        Addressables.InstantiateAsync(dataRef, pos, rot, parent, true);
+                        DestroyObjectsSystem.TryMarkObjectForDestruction(t.gameObject, 0f);
+                        Plugin.Log.LogInfo("[DataDriveSupremacy] Lore available — swapped a credit drive for a data drive.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning($"[DataDriveSupremacy] Credit->data swap failed: {ex.Message}. Left the credit drive.");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[DataDriveSupremacy] Lore breakdown failed: {ex.Message}");
+                Plugin.Log.LogWarning($"[DataDriveSupremacy] Swap pass failed: {ex.Message}");
+            }
+        }
+
+        // Mirrors NarrativeItemSystem.GetRandomValidNarrativeEntry's own null check.
+        private static bool LoreAvailable(NarrativeItemSystem system)
+        {
+            try
+            {
+                float totalWeight = (float)(sTotalWeightField?.GetValue(system) ?? 0f);
+                var dict = sSpawnableEntriesField?.GetValue(system) as System.Collections.IDictionary;
+                return totalWeight > 0f && dict != null && dict.Count > 0;
+            }
+            catch
+            {
+                return false;
             }
         }
     }
